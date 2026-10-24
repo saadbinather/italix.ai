@@ -440,48 +440,6 @@ npm run test:gateway-browser
 npm run test:learning-browser
 ```
 
-## Technical limitations
-
-- MLX inference and LoRA execution currently target Apple Silicon.
-- The local 1.5B model has limited reasoning capacity; every generated claim
-  still requires developer review.
-- Deterministic PR summarization is intentionally conservative and abstains on
-  unsupported or ambiguous input, including binary content.
-- Training execution is synchronous and intended for controlled local runs,
-  not a distributed job platform.
-- The Next.js operator unlock is a local single-user mechanism, not an
-  organization identity provider.
-- No LoRA candidate has passed the production qualification gate.
-- Current cloud spending and realized savings are not measured. Optional cost
-  scenarios are hypothetical until backed by provider billing evidence.
-- Synthetic training and validation fixtures are publishable; sealed holdouts,
-  local traces, and generated adapters remain private.
-- Cloud engines are optional and require both configured credentials and
-  explicit request-level opt-in.
-
-## Roadmap
-
-- Read-only Evaluations and Model Registry command-center pages.
-- Explicitly confirmed training and activation flows in the new UI.
-- Stronger deterministic extraction across additional languages and diff
-  formats.
-- Larger independently authored evaluation suites and reproducible benchmark
-  reports.
-- Multi-user identity, scoped operator roles, and external secret management.
-- Measured cost ingestion that separates provider invoices, local compute, and
-  projections.
-- Background job execution with resumable progress and resource isolation.
-
-## Documentation
-
-- [Core gateway, traces, feedback, and registry](docs/STEP5_CORE.md)
-- [Learning loop and v3 evidence](docs/STEP6_LEARNING_LOOP.md)
-- [Dashboard behavior](docs/STEP7_DASHBOARD.md)
-- [Developer Memory](docs/STEP8_DEVELOPER_MEMORY.md)
-- [Change-triage experiment](docs/STEP9_PRODUCT_AND_TRIAGE.md)
-- [Dataset contracts](data/README.md)
-- [Training notes](training/README.md)
-
 ---
 
 <div align="center">
