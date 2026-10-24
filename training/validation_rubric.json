@@ -1,0 +1,22 @@
+{
+  "required_headings": ["## Summary", "## Changes", "## Testing", "## Risk"],
+  "max_repeated_ngram_ratio": 0.12,
+  "minimum_target_content_recall": 0.35,
+  "examples": [
+    {
+      "id": "analytics_identifiers",
+      "required_concepts": [["email"], ["ip_address", "ip address"], ["strip", "remove", "sanitize"]],
+      "forbidden_phrases": ["encrypt", "hash the", "performance improvement"]
+    },
+    {
+      "id": "audit_retention",
+      "required_concepts": [["30-day", "30 day", "30 days"], ["audit"], ["delete", "remove", "retention"]],
+      "forbidden_phrases": ["archive", "anonymize", "seven years"]
+    },
+    {
+      "id": "mobile_deep_links",
+      "required_concepts": [["allowlist", "allowed", "known route"], ["home"], ["unknown", "unsupported"]],
+      "forbidden_phrases": ["authentication", "encrypt", "web browser"]
+    }
+  ]
+}

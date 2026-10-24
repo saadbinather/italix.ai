@@ -1,0 +1,21 @@
+{
+  "version": "v4-independent-1",
+  "frozen_before_training": true,
+  "cases": 16,
+  "decoding": {
+    "temperature": 0.0,
+    "max_tokens": 160,
+    "repetition_penalty": 1.05,
+    "repetition_context_size": 64
+  },
+  "gates": {
+    "all_headings_once_in_order": true,
+    "exact_testing_line": "- Not run (not shown in diff).",
+    "maximum_repetition_ratio": 0.12,
+    "minimum_content_recall": 0.32,
+    "minimum_identifier_recall": 0.6,
+    "unsupported_claims_allowed": 0,
+    "missing_fallback_values_allowed": 0
+  },
+  "qualification": "candidate must pass all cases and strictly exceed the production-scaffold baseline"
+}

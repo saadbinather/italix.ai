@@ -1,0 +1,18 @@
+train: true
+fine_tune_type: lora
+seed: 42
+num_layers: 4
+batch_size: 1
+iters: 18
+val_batches: -1
+learning_rate: 0.00002
+steps_per_report: 3
+steps_per_eval: 3
+save_every: 3
+max_seq_length: 512
+mask_prompt: true
+adapter_path: artifacts/adapters/v2_run
+lora_parameters:
+  rank: 4
+  dropout: 0.0
+  scale: 8.0

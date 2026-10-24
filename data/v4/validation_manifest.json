@@ -1,0 +1,9 @@
+{
+  "validation_sha256": "e070aa28b5805a7fce18eb5540d4870efb52ac4665e7bff1ffbe9f3eeba2e7af",
+  "rubric_sha256": "09f776be2dd96be6f5d31c2f7d10a3f57578085902cb7c4c46a1b193510b62b7",
+  "train_sha256": "c86b6c87402126355b3ae6b45d442cf90457bc4d5d61005b7462dee1a6bc894a",
+  "validation_cases": 16,
+  "train_cases": 76,
+  "maximum_train_validation_token_jaccard": 0.72,
+  "sealed_holdouts_opened": false
+}

@@ -1,0 +1,18 @@
+# Apple Silicon local model inference.
+mlx-lm==0.30.6
+
+# Local configuration loading; cloud SDKs are intentionally not installed.
+python-dotenv==1.1.1
+
+# Step 5 gateway and local integration tests.
+fastapi==0.116.1
+uvicorn==0.35.0
+httpx==0.28.1
+pytest==8.4.2
+
+# Local Codex integration over MCP stdio. Version follows the official
+# OpenAI Python stdio example and remains compatible with Python 3.11.
+mcp==1.26.0
+
+# Step 7 local product dashboard.
+streamlit==1.50.0

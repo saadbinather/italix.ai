@@ -1,0 +1,18 @@
+train: true
+fine_tune_type: lora
+seed: 117
+num_layers: 8
+batch_size: 1
+iters: 80
+val_batches: -1
+learning_rate: 0.00002
+steps_per_report: 10
+steps_per_eval: 20
+save_every: 20
+max_seq_length: 384
+mask_prompt: true
+adapter_path: artifacts/adapters/change-triage-v2
+lora_parameters:
+  rank: 4
+  dropout: 0.0
+  scale: 8.0

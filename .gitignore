@@ -1,0 +1,135 @@
+# -----------------------------------------------------------------------------
+# Secrets and local authentication
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+credentials*.json
+secrets*.json
+tokens*.json
+.npmrc
+
+# -----------------------------------------------------------------------------
+# Operational state and private data
+# -----------------------------------------------------------------------------
+/var/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*trace*.json
+*traces*.jsonl
+feedback-queue*
+training-queue*
+
+# Sealed/private evaluation material stays local. Synthetic train/validation
+# fixtures remain publishable and reproducible.
+data/**/holdout.jsonl
+data/holdout.jsonl
+data/test.jsonl
+data/**/private/
+data/**/sealed/
+
+# -----------------------------------------------------------------------------
+# Models, adapters, checkpoints, and experiment outputs
+# -----------------------------------------------------------------------------
+/artifacts/
+**/checkpoints/
+**/checkpoint-*/
+**/adapters/
+**/model-weights/
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.mlmodel
+*.npz
+*.npy
+
+# Keep only curated, credential-free product screenshots.
+frontend/artifacts/*
+!frontend/artifacts/screenshots/
+frontend/artifacts/screenshots/*
+!frontend/artifacts/screenshots/overview-desktop.png
+!frontend/artifacts/screenshots/learning-desktop.png
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# -----------------------------------------------------------------------------
+# Node / Next.js
+# -----------------------------------------------------------------------------
+**/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/.vercel/
+frontend/next-env.d.ts
+frontend/*.tsbuildinfo
+.pnp
+.pnp.*
+.yarn/cache/
+.yarn/install-state.gz
+
+# Unused framework starter artwork is not part of the ITALIX.ai brand.
+frontend/public/*.svg
+
+# -----------------------------------------------------------------------------
+# Logs, caches, temporary files, and local tooling
+# -----------------------------------------------------------------------------
+*.log
+logs/
+.cache/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Preserve dependency lockfiles and publication-safe project configuration.
+!package-lock.json
+!frontend/package-lock.json

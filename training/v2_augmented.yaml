@@ -1,0 +1,19 @@
+train: true
+fine_tune_type: lora
+seed: 42
+num_layers: 8
+batch_size: 1
+iters: 12
+val_batches: -1
+learning_rate: 0.00001
+steps_per_report: 3
+steps_per_eval: 3
+save_every: 3
+max_seq_length: 512
+mask_prompt: true
+adapter_path: artifacts/adapters/v2_augmented_run
+resume_adapter_file: artifacts/adapters/v1/adapters.safetensors
+lora_parameters:
+  rank: 8
+  dropout: 0.0
+  scale: 20.0
