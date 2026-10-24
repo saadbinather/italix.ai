@@ -4,7 +4,7 @@
 
 ### Your AI Learns. Your Costs Shrink.
 
-**A local-first AI optimization control plane for observing developer workflows, collecting approved feedback, training bounded specialists, proving quality, and routing only qualified systems.**
+**A local-first platform that helps engineering teams reduce AI inference costs and recover the context behind technical decisions.**
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-8b5cf6?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/Gateway-FastAPI-10b981?style=flat-square)](https://fastapi.tiangolo.com/)
@@ -13,63 +13,78 @@
 [![Tests](https://img.shields.io/badge/Tests-Pytest_%2B_Playwright-22c55e?style=flat-square)](#verification)
 [![Cloud opt-in](https://img.shields.io/badge/Cloud-Explicit_opt--in_only-f59e0b?style=flat-square)](#security-and-privacy)
 
-[Why ITALIX](#why-italixai) · [Capabilities](#working-capabilities) · [Architecture](#architecture) · [Quickstart](#local-quickstart) · [Codex](#codex-mcp-integration) · [Evidence](#current-evidence)
+[Two pillars](#two-pillars-one-local-first-platform) · [Capabilities](#working-capabilities) · [Architecture](#architecture) · [Quickstart](#local-quickstart) · [Codex](#codex-mcp-integration) · [Evidence](#current-evidence)
 
 </div>
 
 ---
 
-## Why ITALIX.ai
+## Two pillars, one local-first platform
 
-General-purpose models can help with software work, but production teams still
-need answers to harder operational questions:
+Engineering teams repeatedly pay general-purpose models to solve familiar
+tasks, while the reasoning behind important code decisions becomes scattered
+across commits and conversations. ITALIX.ai addresses both problems without
+turning developer data into an uncontrolled training stream.
 
-- What actually ran, where did it route, and how long did it take?
-- Which developer corrections are approved for learning?
-- Did a specialist improve on fixed evaluation inputs—or merely lower its loss?
-- Can an experimental adapter be prevented from reaching production?
-- Can useful local work stay local by default?
-- Are savings measured, or only projected from assumptions?
+### 1. AI Cost Optimization
 
-ITALIX.ai turns those questions into one controlled loop:
+ITALIX.ai creates a controlled path from developer feedback to smaller local
+specialists for recurring tasks such as PR summaries and change triage:
 
 ```text
 Observe → Review → Teach → Train → Evaluate → Deploy
 ```
 
-The product combines a local gateway, explicit feedback capture, genuine
-Apple-Silicon LoRA training, server-owned evaluation gates, a persistent model
-registry, auditable routing and rollback, developer memory, Codex MCP tools,
-and an authenticated command center.
+- **Learn from approved feedback.** Capture is off by default. Developers can
+  explicitly approve or correct eligible interactions before they enter a
+  workload-specific training queue.
+- **Fine-tune locally.** MLX-LM performs real rank-bounded LoRA updates against
+  a frozen local base model, with training evidence recorded for review.
+- **Route by demonstrated quality.** Frozen evaluations, qualification gates,
+  a persistent model registry, and audited activation keep experimental
+  adapters away from production routes.
+- **Roll back safely.** Route changes and rollback events use the same registry
+  and audit path, so a workload can return to its previous safe model.
 
-> **Cost claim discipline:** the tagline expresses the product goal. This
-> repository does not claim measured savings. Current cloud spending is
-> reported as “not measured,” and any future savings projection must remain
-> separate from observed usage.
+The practical goal is straightforward: handle repeated developer workloads
+with smaller local specialists when they can match the required quality, and
+reserve expensive cloud inference for cases that genuinely need it. **That
+goal has not yet been proven as measured savings.** Cloud spending is currently
+reported as “not measured,” and no LoRA adapter is production-qualified today.
 
-## The solution
+### 2. Developer Memory
 
-ITALIX.ai is designed around evidence rather than automatic promotion:
+Developer Memory turns selected engineering history into a searchable,
+source-backed knowledge layer:
 
-1. **Route locally first.** Workloads resolve through an explicit registry.
-2. **Capture only with consent.** Prompts and responses are not retained by
-   default.
-3. **Teach from reviewed feedback.** Approve, correct, or reject a captured
-   interaction; only approved records can enter a training queue.
-4. **Train deliberately.** Local MLX-LM jobs require sufficient examples and
-   an explicit execution request.
-5. **Prove quality.** Frozen inputs and workload-specific gates decide whether
-   a candidate qualifies.
-6. **Deploy safely.** Failed candidates stay undeployable; activation and
-   rollback are recorded separately from training.
+- Search imported Git commit metadata and explicitly approved team discussion
+  exports.
+- Recover why a decision was made instead of relying only on the current code.
+- Retrieve labeled evidence before asking the local model to compose an answer.
+- Return the supporting sources with the answer.
+- Abstain when relevant evidence is missing rather than inventing context.
 
-This creates an honest separation between three very different assets:
+This helps developers investigate regressions, revisit tradeoffs, and onboard
+into unfamiliar code with a traceable path back to the original evidence.
+Memory data remains isolated from feedback and LoRA training queues. The
+backend capability is implemented, but **Developer Memory does not yet have a
+dedicated Next.js page**.
+
+### What ITALIX.ai controls
+
+Both pillars run through the same authenticated local gateway, audit trail,
+and explicit-consent boundaries. The system keeps three different assets
+honestly separated:
 
 | Asset | Meaning | Deployment rule |
 |---|---|---|
 | **Base model** | Frozen local Qwen foundation | May remain the safe default |
 | **LoRA adapter** | Trained experimental specialist | Must pass every server-owned qualification gate |
 | **Deterministic system** | Code-based, evidence-only specialist | Validated independently; never labeled as a trained adapter |
+
+ITALIX.ai favors evidence over automatic promotion: prompts are not retained
+by default, training never implies deployment, lower loss does not imply
+qualification, and unsupported memory questions should produce an abstention.
 
 ## Working capabilities
 
