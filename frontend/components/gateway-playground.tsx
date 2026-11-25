@@ -28,7 +28,26 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { ActiveModel } from "@/types/dashboard";
 
-type Workload = "pr_summary" | "change_triage";
+type Workload = "pr_summary" | "change_triage" | "hybrid_triage";
+
+type HybridResult = {
+  result: unknown;
+  decision_source: string;
+  validation_status: string;
+  policy_evidence: unknown[];
+  abstention_reason: string | null;
+  latency_ms: number;
+  explanation: {
+    status: string;
+    model: string | null;
+    latency_ms: number;
+    summary: string;
+    evidence: unknown[];
+    llm_invoked: boolean;
+    prompt_tokens: number | null;
+    completion_tokens: number | null;
+  } | null;
+};
 type SessionState = "checking" | "locked" | "unlocked";
 
 interface CompletionResponse {
@@ -93,11 +112,13 @@ function SelectField({
   label,
   value,
   onChange,
+  disabled = false,
   children,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -106,6 +127,7 @@ function SelectField({
       <span className="relative block">
         <select
           value={value}
+          disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           className="h-10 w-full appearance-none rounded-lg border border-white/[0.08] bg-[#0a0a0d] px-3 pr-9 font-mono text-xs text-zinc-200 outline-none transition-colors hover:border-white/[0.13] focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/10"
         >
@@ -199,6 +221,9 @@ export function OperatorUnlock({ onUnlocked }: { onUnlocked: () => void }) {
 export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[] }) {
   const [session, setSession] = useState<SessionState>("checking");
   const [workload, setWorkload] = useState<Workload>("pr_summary");
+  const [hybridResult, setHybridResult] = useState<HybridResult | null>(null);
+  const [explain, setExplain] = useState(false);
+  const hybrid = workload === "hybrid_triage";
   const [model, setModel] = useState("italix-auto");
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<InferenceResult | null>(null);
@@ -228,6 +253,7 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
     setWorkload(value as Workload);
     setModel("italix-auto");
     setResult(null);
+    setHybridResult(null);
     setError(null);
   }
 
@@ -245,11 +271,12 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
     setGenerating(true);
     setError(null);
     setResult(null);
+    setHybridResult(null);
     try {
-      const response = await fetch("/api/operator/chat/completions", {
+      const response = await fetch(hybrid ? "/api/operator/hybrid/change-triage" : "/api/operator/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(hybrid ? { content, explain } : {
           model,
           workload,
           messages: [{ role: "user", content }],
@@ -272,6 +299,14 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
         setError(detail);
         return;
       }
+      if (hybrid) {
+        if (body && typeof body === "object" && "decision_source" in body && "policy_evidence" in body) {
+          setHybridResult(body as HybridResult);
+        } else {
+          setError("The gateway returned an unexpected hybrid response.");
+        }
+        return;
+      }
       const parsed = parseResponse(body, response.headers.get("x-italix-latency-ms"));
       if (!parsed) {
         setError("The gateway returned an unexpected response shape.");
@@ -289,6 +324,7 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
     await fetch("/api/operator/session", { method: "DELETE" }).catch(() => undefined);
     setPrompt("");
     setResult(null);
+    setHybridResult(null);
     setError(null);
     setSession("locked");
   }
@@ -342,17 +378,23 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
           </CardHeader>
           <CardContent className="space-y-5 p-5">
             <div className="grid gap-3 sm:grid-cols-2">
-              <SelectField label="Workload" value={workload} onChange={updateWorkload}>
+              <SelectField label="Workload" disabled={generating} value={workload} onChange={updateWorkload}>
                 <option value="pr_summary">pr_summary</option>
                 <option value="change_triage">change_triage</option>
+                <option value="hybrid_triage">Hybrid change triage</option>
               </SelectField>
-              <SelectField label="Model route" value={model} onChange={setModel}>
+              {hybrid ? (
+                <label className="flex items-center gap-2 text-sm text-zinc-300">
+                  <input type="checkbox" checked={explain} disabled={generating} onChange={(event) => setExplain(event.target.checked)} />
+                  Select evidence with the local model
+                </label>
+              ) : <SelectField label="Model route" disabled={generating} value={model} onChange={setModel}>
                 {availableModels.map((item) => <option key={item.id} value={item.id}>{item.id}{item.kind === "router" ? " · automatic" : ""}</option>)}
-              </SelectField>
+              </SelectField>}
             </div>
 
             <div className="rounded-lg border border-white/[0.06] bg-black/15 px-3.5 py-3">
-              <div className="flex items-start gap-2.5"><Route className="mt-0.5 size-3.5 shrink-0 text-violet-400" /><div className="min-w-0"><p className="text-[10px] uppercase tracking-[0.12em] text-zinc-600">Active workload route</p><p className="mt-1 break-all font-mono text-[11px] text-zinc-300">{activeRoute ? `${activeRoute.id} · ${activeRoute.kind}` : "No active route reported"}</p></div></div>
+              <div className="flex items-start gap-2.5"><Route className="mt-0.5 size-3.5 shrink-0 text-violet-400" /><div className="min-w-0"><p className="text-[10px] uppercase tracking-[0.12em] text-zinc-600">Active workload route</p><p className="mt-1 break-all font-mono text-[11px] text-zinc-300">{hybrid ? "Path policy with optional local evidence selection" : activeRoute ? `${activeRoute.id} · ${activeRoute.kind}` : "No active route reported"}</p></div></div>
             </div>
 
             <label className="block">
@@ -372,7 +414,7 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
             {error && <p className="flex items-start gap-2 rounded-lg border border-rose-400/10 bg-rose-400/[0.04] px-3 py-2.5 text-xs leading-5 text-rose-300" role="alert"><AlertCircle className="mt-0.5 size-3.5 shrink-0" />{error}</p>}
 
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <button type="button" onClick={() => { setPrompt(SAMPLE_DIFF); setWorkload("pr_summary"); setModel("italix-auto"); setResult(null); setError(null); textarea.current?.focus(); }} className="flex h-10 items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 text-xs text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"><FileDiff className="size-3.5" /> Load safe sample</button>
+              <button type="button" disabled={generating} onClick={() => { setPrompt(SAMPLE_DIFF); setWorkload("pr_summary"); setModel("italix-auto"); setResult(null); setHybridResult(null); setError(null); textarea.current?.focus(); }} className="flex h-10 items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 text-xs text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"><FileDiff className="size-3.5" /> Load safe sample</button>
               <button type="button" onClick={() => void generate()} disabled={generating || !prompt.trim()} className="flex h-10 items-center justify-center gap-2 rounded-lg bg-violet-500 px-5 text-xs font-medium text-white shadow-[0_8px_24px_rgb(124_58_237/0.18)] transition-colors hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300">
                 {generating ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-3.5 fill-current" />}{generating ? "Generating…" : "Generate"}<kbd className="ml-1 hidden rounded border border-white/15 bg-black/10 px-1.5 py-0.5 font-mono text-[9px] text-violet-100/70 sm:inline">⌘ ↵</kbd>
               </button>
@@ -387,6 +429,23 @@ export function GatewayPlayground({ activeModels }: { activeModels: ActiveModel[
           <CardContent className="flex min-h-[42rem] flex-col p-5">
             {generating ? (
               <div className="flex flex-1 flex-col"><div className="flex items-center gap-2 text-xs text-violet-300"><LoaderCircle className="size-3.5 animate-spin" /> Routing local request…</div><div className="mt-6 space-y-3">{["w-4/5", "w-full", "w-3/4", "w-5/6"].map((width) => <div key={width} className={cn("h-3 animate-pulse rounded bg-white/[0.045]", width)} />)}</div></div>
+            ) : hybridResult ? (
+              <div data-testid="hybrid-result" className="space-y-4 text-sm text-zinc-300">
+                <p>{hybridResult.decision_source} · {hybridResult.validation_status} · {hybridResult.latency_ms} ms</p>
+                {hybridResult.abstention_reason && <p>Human review required · {hybridResult.abstention_reason}</p>}
+                {hybridResult.result != null && <pre>{JSON.stringify(hybridResult.result, null, 2)}</pre>}
+                <h3>Matched policies</h3>
+                <pre className="whitespace-pre-wrap break-words">{JSON.stringify(hybridResult.policy_evidence, null, 2)}</pre>
+                <p>Local model invocation attempted · {hybridResult.explanation?.llm_invoked ? "Yes" : "No"}</p>
+                {hybridResult.explanation && <>
+                  <p>{hybridResult.explanation.status} · {hybridResult.explanation.summary}</p>
+                  <p>Local inference latency · {hybridResult.explanation.latency_ms} ms</p>
+                  {hybridResult.explanation.model && <p>Model · {hybridResult.explanation.model}</p>}
+                  <p>Prompt tokens · {hybridResult.explanation.prompt_tokens ?? "Unavailable"} · Output tokens · {hybridResult.explanation.completion_tokens ?? "Unavailable"}</p>
+                  <h3>Code excerpts</h3>
+                  <pre className="whitespace-pre-wrap break-words">{JSON.stringify(hybridResult.explanation.evidence, null, 2)}</pre>
+                </>}
+              </div>
             ) : result ? (
               <>
                 <div className="flex flex-wrap gap-2">

@@ -81,6 +81,13 @@ class HybridTriageRequest(BaseModel):
     allow_cloud: bool = False
 
 
+class HybridTriageV2Request(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=20000)
+    explain: bool = False
+
+
 class OverviewActiveModel(BaseModel):
     id: str
     workload: str

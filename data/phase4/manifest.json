@@ -1,0 +1,89 @@
+{
+  "model_revision": "8b403126fc14f14cfc99bb4cfa72ecbc129ea677",
+  "configuration": {
+    "engine": "MLX-LM",
+    "base_model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "fine_tune_type": "LoRA",
+    "rank": 4,
+    "workload": "change_triage",
+    "trainable_layers": 8,
+    "optimizer_steps": 80,
+    "learning_rate": 2e-05,
+    "batch_size": 1,
+    "max_sequence_length": 384,
+    "mask_prompt": true,
+    "execution": "synchronous local optimization",
+    "cloud_required": false,
+    "estimated_resources": {
+      "duration_seconds": "30-90",
+      "peak_mlx_memory_gb": 2.0,
+      "trainable_parameters": 1318912
+    },
+    "seed": 117,
+    "lora_dropout": 0.0,
+    "lora_scale": 8.0,
+    "validation_interval": 20,
+    "checkpoint_interval": 20,
+    "reporting_interval": 4,
+    "validation_batches": -1
+  },
+  "rows": [
+    72,
+    12
+  ],
+  "new_tokens": {
+    "min": 136,
+    "median": 143.5,
+    "p95": 152.45,
+    "max": 153,
+    "total": 1719
+  },
+  "train_tokens": {
+    "min": 136,
+    "median": 155.0,
+    "p95": 167.45,
+    "max": 171,
+    "total": 11137
+  },
+  "validation_tokens": {
+    "min": 145,
+    "median": 156.0,
+    "p95": 167.0,
+    "max": 167,
+    "total": 1878
+  },
+  "exact_overlap": 0,
+  "max_new_vs_validation_diff_token_jaccard": 0.6,
+  "curated_validation_rows_with_matching_normalized_training_template": 12,
+  "sha256": {
+    "new_examples": "81154b83107111f7acdad64198f44358a5d8dd993f9fd9ec162b4dba62196a27",
+    "curated_train": "e47eac46d58f28e1d0c5cd2536fb8ea692c10df12a844112aaf5c1bbf7cac42f",
+    "curated_validation": "42c34d3b5ad79f4cd13410778d0d8105d9b93bf7d3a76b8f61780111a53a32c3",
+    "final_train": "5e2323fb063b2075541e50a7005b185dcd0ba3c2ba5883898b090197b95e59e0",
+    "final_validation": "42c34d3b5ad79f4cd13410778d0d8105d9b93bf7d3a76b8f61780111a53a32c3"
+  },
+  "evaluation": {
+    "workload": "change_triage",
+    "split": "valid",
+    "dataset": "data/change_triage/valid.jsonl",
+    "decoding": {
+      "max_tokens": 60,
+      "temperature": 0.0
+    },
+    "baseline_compact": {
+      "passed": 0,
+      "total": 12,
+      "average_prompt_tokens": 140.0
+    },
+    "baseline_production_scaffold": {
+      "passed": 6,
+      "total": 12,
+      "average_prompt_tokens": 391.0
+    },
+    "qualification": {
+      "exact_pass_rate": 1.0,
+      "quality_at_least_scaffold": true,
+      "maximum_prompt_token_ratio": 0.4
+    }
+  }
+}

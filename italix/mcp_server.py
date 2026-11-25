@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from typing import Annotated, Any, Literal
 
@@ -15,6 +14,11 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+if __package__:
+    from italix.privacy import contains_secret as _contains_secret, redact as _redact
+else:
+    from privacy import contains_secret as _contains_secret, redact as _redact
+
 
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 180.0
@@ -22,31 +26,7 @@ SUPPORTED_WORKLOADS = ("pr_summary", "change_triage")
 TRAINING_CONFIRMATION = "I confirm local LoRA training"
 DEPLOYMENT_CONFIRMATION = "I confirm specialist activation"
 
-# These patterns intentionally favor false positives over returning credentials
-# to an MCP client. They cover the providers configured by ITALIX plus common
-# authorization and environment-variable forms.
-_SECRET_PATTERNS = (
-    re.compile(
-        r"(?i)(?:\b[A-Z][A-Z0-9_]*_)?(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"
-    ),
-    re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+"),
-    re.compile(r"\b(?:sk-|gsk_)[A-Za-z0-9_-]{12,}\b"),
-    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"),
-)
-
-
 load_dotenv(override=False)
-
-
-def _redact(value: str) -> str:
-    result = value
-    for pattern in _SECRET_PATTERNS:
-        result = pattern.sub("[REDACTED]", result)
-    return result
-
-
-def _contains_secret(value: str) -> bool:
-    return any(pattern.search(value) for pattern in _SECRET_PATTERNS)
 
 
 def _evaluation_summary(evaluation: Any) -> Any:
@@ -193,7 +173,6 @@ async def italix_learning_status() -> dict[str, Any]:
                 )
             }
             for job in jobs
-            if job.get("status") in {"planned", "completed"}
         ],
         "adapters": [
             {
@@ -473,6 +452,23 @@ async def italix_chat(
             "reason": "backend did not return change_triage validation",
         }
     return result
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False),
+    structured_output=True,
+)
+async def italix_hybrid_triage(
+    content: Annotated[str, Field(min_length=1, max_length=20_000)],
+    explain: bool = False,
+) -> dict[str, Any]:
+    """Run opt-in policy triage on a sanitized patch, with optional local evidence selection."""
+    if _contains_secret(content):
+        raise ToolError("Patch appears to contain a credential or secret; remove it before retrying.")
+    response = await backend.request(
+        "POST", "/v1/hybrid/change-triage/v2", json={"content": content, "explain": explain}
+    )
+    return response.json()
 
 
 @mcp.tool(

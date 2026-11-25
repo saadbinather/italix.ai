@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -198,12 +199,12 @@ class ServerEvaluator:
         self.root = Path(root or Path(__file__).resolve().parents[1])
         self.allow_holdout = allow_holdout
 
-    def _candidate(self, name: str, adapter_path: str | None, rows: list[dict], scaffold: bool) -> dict:
+    def _candidate(self, name: str, adapter_path: str | None, rows: list[dict], scaffold: bool, *, model_path: Path | None = None) -> dict:
         import mlx.core as mx
         from mlx_lm import generate, load
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
-        model, tokenizer = load(str(cached_qwen_path()), adapter_path=adapter_path)
+        model, tokenizer = load(str(model_path or cached_qwen_path()), adapter_path=adapter_path)
         sampler = make_sampler(temp=0.0)
         processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=64)
         results = []
@@ -238,25 +239,36 @@ class ServerEvaluator:
     def _compare_pr(self, candidate_path: str, split: str) -> dict[str, Any]:
         if split not in {"valid", "holdout"}:
             raise ValueError("evaluation split must be valid or holdout")
-        rows = [
-            json.loads(line)
-            for line in (self.root / f"data/v3/{split}.jsonl").read_text().splitlines()
-        ]
+        dataset = (self.root / f"data/v3/{split}.jsonl").read_bytes()
+        rows = [json.loads(line) for line in dataset.splitlines()]
+        model_path = cached_qwen_path()
         candidates = [
-            self._candidate("base_raw", None, rows, scaffold=False),
-            self._candidate("base_scaffold", None, rows, scaffold=True),
-            self._candidate("adapter_v2", str(self.root / "artifacts/adapters/v2"), rows, scaffold=True),
-            self._candidate("candidate", str(self.root / candidate_path), rows, scaffold=True),
+            self._candidate("base_raw", None, rows, scaffold=False, model_path=model_path),
+            self._candidate("base_scaffold", None, rows, scaffold=True, model_path=model_path),
+            self._candidate("candidate", str(self.root / candidate_path), rows, scaffold=True, model_path=model_path),
         ]
+        historical = self.root / "artifacts/adapters/v2"
+        historical_status = "unavailable"
+        if all((historical / name).is_file() for name in ("adapter_config.json", "adapters.safetensors")):
+            try:
+                candidates.append(self._candidate("adapter_v2", str(historical), rows, scaffold=True, model_path=model_path))
+                historical_status = "evaluated"
+            except (OSError, ValueError, RuntimeError):
+                historical_status = "load_or_inference_failed"
         scaffold = next(item for item in candidates if item["name"] == "base_scaffold")
         candidate = next(item for item in candidates if item["name"] == "candidate")
         qualified = candidate["passed"] == candidate["total"] and candidate["passed"] > scaffold["passed"]
         return {
             "split": split,
+            "historical_adapter_v2": historical_status,
+            "model_revision": model_path.name,
+            "dataset_sha256": sha256(dataset).hexdigest(),
+            "scaffold_sha256": sha256(SYSTEM_PROMPT.encode()).hexdigest(),
             "policy": {
                 "max_tokens": MAX_TOKENS,
                 "temperature": 0.0,
                 "repetition_penalty": 1.05,
+                "repetition_context_size": 64,
                 "repetition_limit": REPETITION_LIMIT,
                 "minimum_content_recall": MIN_CONTENT_RECALL,
                 "minimum_identifier_recall": MIN_IDENTIFIER_RECALL,
@@ -271,12 +283,12 @@ class ServerEvaluator:
             ),
         }
 
-    def _triage_candidate(self, name, adapter_path, rows, system_prompt):
+    def _triage_candidate(self, name, adapter_path, rows, system_prompt, *, model_path: Path | None = None):
         import mlx.core as mx
         from mlx_lm import generate, load
         from mlx_lm.sample_utils import make_sampler
 
-        model, tokenizer = load(str(cached_qwen_path()), adapter_path=adapter_path)
+        model, tokenizer = load(str(model_path or cached_qwen_path()), adapter_path=adapter_path)
         results, prompt_tokens = [], []
         for index, row in enumerate(rows, 1):
             messages = [{"role": "system", "content": system_prompt}, row["messages"][-2]]
@@ -302,18 +314,24 @@ class ServerEvaluator:
                 "average_prompt_tokens": sum(prompt_tokens) / len(prompt_tokens), "examples": results}
 
     def _compare_triage(self, candidate_path: str, split: str) -> dict[str, Any]:
-        rows = [json.loads(line) for line in
-                (self.root / f"data/change_triage/{split}.jsonl").read_text().splitlines()]
+        dataset = (self.root / f"data/change_triage/{split}.jsonl").read_bytes()
+        rows = [json.loads(line) for line in dataset.splitlines()]
+        model_path = cached_qwen_path()
         candidates = [
-            self._triage_candidate("base_compact", None, rows, COMPACT_PROMPT),
-            self._triage_candidate("base_production_scaffold", None, rows, PRODUCTION_PROMPT),
-            self._triage_candidate("candidate", str(self.root / candidate_path), rows, COMPACT_PROMPT),
+            self._triage_candidate("base_compact", None, rows, COMPACT_PROMPT, model_path=model_path),
+            self._triage_candidate("base_production_scaffold", None, rows, PRODUCTION_PROMPT, model_path=model_path),
+            self._triage_candidate("candidate", str(self.root / candidate_path), rows, COMPACT_PROMPT, model_path=model_path),
         ]
         scaffold, candidate = candidates[1], candidates[2]
         qualified = (candidate["passed"] == candidate["total"]
                      and candidate["passed"] >= scaffold["passed"]
                      and candidate["average_prompt_tokens"] <= scaffold["average_prompt_tokens"] * .40)
         return {"workload": "change_triage", "split": split,
+                "model_revision": model_path.name,
+                "dataset_sha256": sha256(dataset).hexdigest(),
+                "prompt_sha256": {"compact": sha256(COMPACT_PROMPT.encode()).hexdigest(),
+                                  "scaffold": sha256(PRODUCTION_PROMPT.encode()).hexdigest()},
+                "decoding": {"max_tokens": TRIAGE_TOKENS, "temperature": 0.0},
                 "policy": {"exact_pass_rate": 1.0, "quality_at_least_scaffold": True,
                            "maximum_prompt_token_ratio": .40},
                 "candidates": candidates, "qualified": qualified,

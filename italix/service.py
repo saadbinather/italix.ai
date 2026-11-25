@@ -9,6 +9,7 @@ import uuid
 from italix.database import Database, utc_now
 from italix.change_triage import validate_triage_output
 from italix.engines import Engine, Generation, prepare_messages
+from italix.privacy import contains_secret, redact
 from italix.routing import Router, identify_workload
 from italix.schemas import ChatCompletionRequest
 
@@ -31,6 +32,10 @@ class GatewayService:
 
     def complete(self, request: ChatCompletionRequest) -> tuple[dict, str]:
         original_messages = [message.model_dump() for message in request.messages]
+        if any(contains_secret(field) for field in (request.model, request.workload or "")):
+            raise ValueError("Request identifiers appear to contain a credential.")
+        if request.capture and any(contains_secret(m["content"]) for m in original_messages):
+            raise ValueError("Capture blocked because the prompt appears to contain a credential.")
         workload = identify_workload(original_messages, request.workload)
         decision = self.router.decide(workload, request.model, request.allow_cloud)
         selected_route = decision.route
@@ -49,7 +54,7 @@ class GatewayService:
                 try:
                     adapter_path = None
                     if selected_model != "qwen-base":
-                        adapter_path = self.database.active_model(workload)["path"]
+                        adapter_path = self.database.model(selected_model)["path"]
                     generation = self.local.generate(
                         messages, request.max_tokens, request.temperature, adapter_path=adapter_path
                     )
@@ -65,8 +70,10 @@ class GatewayService:
             else:
                 generation = self.groq.generate(messages, request.max_tokens, request.temperature)
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            raise
+            error = type(exc).__name__
+            if isinstance(exc, (PermissionError, ValueError, FileNotFoundError, RuntimeError)):
+                raise
+            raise RuntimeError("Inference failed.") from None
         finally:
             latency_ms = (time.perf_counter() - started) * 1000
             if error:
@@ -90,6 +97,8 @@ class GatewayService:
                     }
                 )
         latency_ms = (time.perf_counter() - started) * 1000
+        output = redact(generation.text)
+        capture = request.capture and output == generation.text
         validation = {
             "inference_succeeded": True,
             "adapter_qualified": selected_model in {"qwen-base", "qwen-base-triage"},
@@ -102,7 +111,7 @@ class GatewayService:
             )
         if workload == "change_triage":
             validation["change_triage"] = validate_triage_output(
-                generation.text, "\n".join(message["content"] for message in original_messages)
+                output, "\n".join(message["content"] for message in original_messages)
             )
         self.database.insert_trace(
             {
@@ -113,9 +122,9 @@ class GatewayService:
                 "selected_model": selected_model,
                 "route": selected_route,
                 "routing_reason": routing_reason,
-                "capture_enabled": int(request.capture),
-                "prompt_json": json.dumps(original_messages) if request.capture else None,
-                "response_text": generation.text if request.capture else None,
+                "capture_enabled": int(capture),
+                "prompt_json": json.dumps(original_messages) if capture else None,
+                "response_text": output if capture else None,
                 "prompt_tokens": generation.prompt_tokens,
                 "completion_tokens": generation.completion_tokens,
                 "latency_ms": latency_ms,
@@ -132,7 +141,7 @@ class GatewayService:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": generation.text},
+                    "message": {"role": "assistant", "content": output},
                     "finish_reason": "stop",
                 }
             ],
@@ -151,7 +160,7 @@ class GatewayService:
                 "route": selected_route,
                 "registry_model": selected_model,
                 "routing_reason": routing_reason,
-                "capture_enabled": request.capture,
+                "capture_enabled": capture,
                 "validation": validation.get("change_triage"),
                 "deterministic_validation": validation.get("deterministic_pr_summary"),
                 "abstained": validation.get("abstained", False),

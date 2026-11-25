@@ -4,7 +4,9 @@
 
 ### Your AI Learns. Your Costs Shrink.
 
-**A local-first platform that helps engineering teams reduce AI inference costs and recover the context behind technical decisions.**
+**A local-first AI gateway for engineering workflows, controlled model learning, and source-backed Developer Memory.**
+
+Original project by [Saad Bin Ather](https://github.com/saadbinather).
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-8b5cf6?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/Gateway-FastAPI-10b981?style=flat-square)](https://fastapi.tiangolo.com/)
@@ -93,11 +95,18 @@ qualification, and unsupported memory questions should produce an abstention.
   abstention.
 - **Deterministic PR summarization** that extracts changed files, identifiers,
   constants, supported renames, and fallback values directly from Git diffs.
-- **Change triage** against a fixed policy schema with explicit validation.
+- **Opt-in hybrid change triage** in the Gateway UI, FastAPI, and Codex MCP.
+  Path policy determines the classification. A local model can select
+  supporting excerpts on request. Unsupported, ambiguous, or conflicting
+  changes are sent for human review.
+- **Model-free startup** for health checks, deterministic PR summaries,
+  policy-only hybrid triage, and model-independent tests.
 - **Consent-based traces and feedback** with approve, correct, and reject
   states.
 - **Training queue isolation**: captured data is not automatically eligible,
-  and feedback never starts training.
+  and feedback never starts training. Queue deduplication and reviewed,
+  checksummed dataset snapshots protect training from repeated examples and
+  changes after review.
 - **Real MLX-LM LoRA jobs** from a frozen cached base, including loss, duration,
   memory, parameter-delta, and adapter-update evidence.
 - **Evaluation and qualification gates** that reject unsupported claims,
@@ -109,7 +118,7 @@ qualification, and unsupported memory questions should produce an abstention.
   approved discussion exports, isolated from LoRA training data.
 - **Codex MCP integration** for status, inference, feedback, learning progress,
   controlled training plans, and controlled deployment plans.
-- **Premium Next.js command center** with Overview, AI Gateway, and read-only
+- **Next.js command center** with Overview, AI Gateway, and read-only
   Learning Studio pages.
 
 ## Product command center
@@ -126,8 +135,7 @@ does not place FastAPI bearer tokens in browser JavaScript.
 ![ITALIX.ai Learning Studio](frontend/artifacts/screenshots/learning-desktop.png)
 
 The screenshots above are from the running local system. Values represent that
-local database at capture time—not synthetic time series or guaranteed future
-results.
+original local demo database at capture time.
 
 ## Architecture
 
@@ -166,10 +174,10 @@ flowchart LR
 
 | Layer | Technology |
 |---|---|
-| Local inference and training | Apple MLX, MLX-LM, Qwen2.5 1.5B Instruct 4-bit |
+| Local inference and training | Apple MLX, MLX-LM, pinned Qwen 4-bit model catalog |
 | Gateway | Python 3.11, FastAPI, Uvicorn, Pydantic, HTTPX |
 | Persistence | SQLite, SQLite FTS5 |
-| Command center | Next.js 16 App Router, React 19, TypeScript, Tailwind CSS 4, Recharts |
+| Command center | Next.js 16.4.5 App Router, React 19, TypeScript, Tailwind CSS 4, Recharts |
 | Agent integration | Model Context Protocol over stdio, project-local Codex Skill |
 | Quality | Pytest, Playwright, TypeScript, ESLint |
 
@@ -199,8 +207,8 @@ excluded from Git.
 - Python 3.11
 - Node.js 20 or newer and npm
 - Git
-- Approximately 2 GB of available unified memory for the documented small
-  LoRA runs, in addition to application and model overhead
+- For optional local generation, allow disk space for the model snapshot and
+  memory for inference alongside macOS and other applications
 
 ### 1. Clone and install the backend
 
@@ -214,17 +222,45 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The gateway expects the frozen Qwen base in the local Hugging Face cache and
-does not silently download a model during a request. Run the explicit smoke
-workflow once if the model is not already cached:
+The backend starts without model weights. Install models explicitly for local
+generation. The supported Apple Silicon models use MLX 4-bit snapshots.
+
+| Model | Catalog ID | Pinned revision | Full snapshot |
+| --- | --- | --- | ---: |
+| Qwen2.5-1.5B-Instruct | `qwen-base` | `8b403126fc14f14cfc99bb4cfa72ecbc129ea677` | 0.82 GiB |
+| Qwen3-4B-Instruct-2507 | `qwen3-4b` | `50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b` | 2.12 GiB |
+| Qwen2.5-Coder-7B-Instruct | `qwen-coder-7b` | `019cc73c45c770444708a6dd8690c66243cc5c80` | 4.00 GiB |
+
+Cache the default Qwen base using this explicit download command. Change
+`model_id` to download one of the optional revisions.
 
 ```bash
-python scripts/check_environment.py
-python scripts/smoke_inference.py
+python - <<'PYMODEL'
+from huggingface_hub import snapshot_download
+from italix.engines import LOCAL_MODELS
+
+model_id = "qwen-base"
+model = LOCAL_MODELS[model_id]
+snapshot_download(model.repository, revision=model.revision)
+PYMODEL
 ```
 
-That first model setup may require network access. Normal local routing and
-training use the cached base.
+Use the default Hugging Face cache location for the ordinary gateway and
+training paths. Set `ITALIX_HYBRID_MODEL=qwen3-4b` or `qwen-coder-7b` before
+starting FastAPI to opt into a different model for hybrid explanations.
+The MLX worker lazily loads the selected model and evicts the resident model
+when switching. Existing chat and adapter routes use the 1.5B base. A missing
+snapshot leaves deterministic routes usable.
+
+For an offline inference smoke test after caching the base:
+
+```bash
+HF_HUB_OFFLINE=1 python -m scripts.compare_local_models qwen-base /tmp/italix-smoke.jsonl --smoke
+```
+
+The smoke output path must be new. The optional comparison protocol is
+documented in [Phase 8](docs/PHASE8_MODEL_COMPARISON.md) and
+[Phase 9](docs/PHASE9_COMPARISON.md).
 
 ### 2. Configure local secrets
 
@@ -249,11 +285,13 @@ route still requires `allow_cloud=true` on that individual request.
 
 ```bash
 source .venv/bin/activate
-python -m italix.main
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m italix.main
 ```
 
 FastAPI binds to `http://127.0.0.1:8000`; `/health` remains public while every
-`/v1` endpoint requires a viewer or operator bearer token.
+`/v1` endpoint requires a viewer or operator bearer token. Use
+`ITALIX_DB_PATH="$(mktemp -d)/italix.sqlite"` to isolate a test launch.
+Verify model-free startup with `curl -fsS http://127.0.0.1:8000/health`.
 
 ### 4. Start the command center
 
@@ -288,7 +326,7 @@ curl --silent --show-error \
   --header "Authorization: Bearer ${ITALIX_OPERATOR_TOKEN}" \
   --header 'Content-Type: application/json' \
   --data '{
-    "model": "italix-auto",
+    "model": "pr-summary-deterministic-v1",
     "workload": "pr_summary",
     "messages": [{
       "role": "user",
@@ -303,7 +341,13 @@ curl --silent --show-error \
 
 The response includes the generated content plus ITALIX metadata such as the
 selected registry model, route, trace ID, validation, capture status, and any
-abstention reason.
+abstention reason. This example works without MLX weights.
+
+In the Gateway UI, select **Hybrid change triage** and paste a unified Git
+diff. Enable local evidence selection only when needed. The equivalent
+operator API is `POST /v1/hybrid/change-triage/v2` with `content` and optional
+`explain`. It returns policy evidence, validation status, human-review reason
+when applicable, and timing and token counts when available.
 
 ## Codex MCP integration
 
@@ -311,7 +355,7 @@ The local MCP server reuses the authenticated FastAPI backend. From the
 repository root:
 
 ```bash
-codex mcp add italix -- "$(pwd)/.venv/bin/python" "$(pwd)/italix/mcp_server.py"
+codex mcp add italix -- "$(pwd)/.venv/bin/python" -m italix.mcp_server
 codex mcp list
 ```
 
@@ -326,6 +370,7 @@ and diff-redaction rules for these registered tools:
 - `italix_status`
 - `italix_learning_status`
 - `italix_chat`
+- `italix_hybrid_triage`
 - `italix_submit_feedback`
 - `italix_train_specialist`
 - `italix_deploy_specialist`
@@ -342,7 +387,7 @@ training job:
 captured trace
   → explicit developer approval or correction
   → workload-specific pending queue
-  → minimum-example readiness check
+  → minimum-example readiness and dataset snapshot checks
   → explicit local training execution
   → frozen-base MLX-LM LoRA update
   → tensor-delta verification
@@ -377,7 +422,7 @@ workload’s base route through the same registry path.
 
 ## Current evidence
 
-These are actual repository results, not projected benchmarks:
+Historical evaluations used small synthetic datasets and workload-specific gates.
 
 | Workload / candidate | Evidence | Status |
 |---|---:|---|
@@ -388,10 +433,33 @@ These are actual repository results, not projected benchmarks:
 | Change-triage compact base prompt | 0/12 exact validation | Baseline only |
 | Change-triage full policy scaffold | 6/12 exact validation | Baseline only |
 | `triage-adapter-b` | 9/12 exact validation | `experimental_failed` |
+| Phase 5 change triage LoRA | 5/12 exact, 12/12 owner and reviewer, 5/12 risk | `experimental_failed` |
+| Experiment A, replacement corpus | 6/12 exact | `experimental_failed` |
+| Experiment C, balanced corpus | 4/12 exact | `experimental_failed` |
+| Experiment E, risk-token weighting | 4/12 exact | `experimental_failed` |
+| Experiment F, classification-aware objective | 0/12 exact | `experimental_failed` |
 
-No LoRA adapter is currently production-qualified. PR summarization is served
-by a separately validated deterministic system; change triage remains on its
-base route. Sealed holdouts were not opened for failed candidates.
+No tested LoRA adapter passed qualification. Change-triage validation shares
+templates with training. The auxiliary diagnostic split informed experiment
+design, and the reserved final evaluation was kept sealed. Lower loss and
+workload qualification results cannot establish generalization.
+
+Phase 9 ran matched zero-shot smoke tests on an M1 Pro with 16 GB unified
+memory. Each model ran nine requests across three cases.
+
+| Model | Warm median latency | Mean decode throughput | Peak MLX |
+| --- | ---: | ---: | ---: |
+| Qwen2.5 1.5B | 438 ms | 147 tokens/s | 1.39 GB |
+| Qwen3 4B | 1,154 ms | 66 tokens/s | 2.86 GB |
+| Qwen2.5-Coder 7B | 1,482 ms | 43 tokens/s | 4.78 GB |
+
+The larger models summarized the two-file smoke case more accurately.
+All three guessed classifications on cases that required abstention.
+The 100-case pilot is synthetic and still needs independent human review.
+Long-context performance, workload-wide model ranking, and cost savings are
+unverified. Developer Memory currently has a backend API and Learning Studio
+is read-only.
+
 
 ## Developer Memory
 
@@ -419,13 +487,21 @@ supported formats and safety boundary.
 - Same-origin checks, JSON content-type enforcement, request-size limits, and
   strict parameter allowlists on the browser inference path.
 - `capture=false` and `allow_cloud=false` by default.
-- Captured prompt/response payloads require explicit consent.
+- Captured prompt/response payloads require explicit consent. Credential-like
+  content is screened on capture, feedback, and hybrid triage. Pattern-based
+  screening can miss sensitive content. Sanitize patches before sending.
 - Training feedback requires an eligible captured trace.
 - Read-only Learning Studio responses expose aggregate metrics, never raw
   examples, prompts, responses, adapter paths, or log paths.
 - Local services bind to `127.0.0.1` by default.
 - Secrets, SQLite state, traces, weights, checkpoints, logs, and sealed datasets
   are excluded from version control.
+
+The Phase 9 production npm audit reported zero findings. The full npm audit
+still reported development-tooling advisories. A publication audit of the pinned
+Python requirements reported advisories in `python-dotenv`, `mcp`, `streamlit`,
+and the development test runner `pytest`. The quickstart is for local loopback
+use. Review and update affected dependencies before exposing the services.
 
 ## Verification
 
@@ -454,6 +530,15 @@ npm run test:operator-persistent
 npm run test:gateway-browser
 npm run test:learning-browser
 ```
+
+## Attribution and licensing
+
+This GitHub fork preserves the original project history and attribution to
+[Saad Bin Ather](https://github.com/saadbinather). The
+[upstream repository](https://github.com/saadbinather/italix.ai) has no
+repository-wide license file. Third-party dependencies and separately
+downloaded model snapshots are governed by their respective licenses. The
+Qwen MLX snapshot listings identify Apache-2.0.
 
 ---
 

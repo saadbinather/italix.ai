@@ -192,6 +192,9 @@ def test_approval_and_correction_enter_queue_but_rejection_does_not(tmp_path):
     approved = client.post(f"/v1/traces/{trace_id}/feedback", json={"action": "approve"})
     assert approved.status_code == 200
     assert approved.json()["queued"] is True
+    repeated = client.post(f"/v1/traces/{trace_id}/feedback", json={"action": "approve"})
+    assert repeated.status_code == 200
+    assert repeated.json()["queued"] is True
     assert client.get("/v1/training/queue?workload=pr_summary").json()["pending"] == 1
 
     corrected_text = "## Summary\nApproved correction"
@@ -234,6 +237,53 @@ def test_training_action_plans_batch_without_running_training(tmp_path):
     assert response.json()["status"] == "planned"
 
 
+def test_rejected_example_invalidates_planned_export(tmp_path):
+    client, app, _, _ = make_client(tmp_path)
+    response = client.post("/v1/chat/completions", json=request_body(capture=True)).json()
+    feedback_path = f"/v1/traces/{response['italix']['trace_id']}/feedback"
+    assert client.post(feedback_path, json={"action": "approve"}).json()["queued"] is True
+    plan = client.post(
+        "/v1/training/jobs", json={"workload": "pr_summary", "minimum_examples": 1}
+    ).json()
+    assert client.post(feedback_path, json={"action": "reject"}).json()["queued"] is False
+    runner = app.state.training_runner
+    destination = tmp_path / "dataset"
+    with pytest.raises(ValueError, match="no longer pending"):
+        runner._export_data(plan["id"], destination, runner._spec("pr_summary"))
+    assert not (destination / "train.jsonl").exists()
+
+
+def test_curated_dataset_drift_blocks_planned_export(tmp_path):
+    client, app, _, _ = make_client(tmp_path)
+    response = client.post("/v1/chat/completions", json=request_body(capture=True)).json()
+    client.post(f"/v1/traces/{response['italix']['trace_id']}/feedback", json={"action": "approve"})
+    plan = app.state.database.create_training_job("pr_summary", 1)
+    runner = app.state.training_runner
+    dataset = tmp_path / "data/v3"
+    dataset.mkdir(parents=True)
+    (dataset / "train.jsonl").write_text("changed")
+    runner.root = tmp_path
+    with pytest.raises(ValueError, match="curated dataset changed"):
+        runner._export_data(plan["id"], tmp_path / "export", runner._spec("pr_summary"))
+    assert not (tmp_path / "export").exists()
+
+
+def test_general_feedback_is_stored_without_training_eligibility(tmp_path):
+    client, app, _, _ = make_client(tmp_path)
+    body = request_body(capture=True)
+    body["workload"] = "general"
+    response = client.post("/v1/chat/completions", json=body).json()
+    feedback = client.post(
+        f"/v1/traces/{response['italix']['trace_id']}/feedback", json={"action": "approve"}
+    )
+    assert feedback.status_code == 200
+    assert feedback.json()["queued"] is False
+    assert client.get("/v1/training/queue").json()["pending"] == 0
+    with app.state.database.connect() as connection:
+        assert connection.execute("SELECT eligible FROM feedback").fetchone()[0] == 0
+    assert client.post("/v1/training/jobs", json={"workload": "general"}).status_code == 422
+
+
 def test_training_queue_reports_readiness_from_requested_minimum(tmp_path):
     client, _, _, _ = make_client(tmp_path)
     empty = client.get("/v1/training/queue?workload=pr_summary&minimum_examples=1").json()
@@ -246,6 +296,77 @@ def test_training_queue_reports_readiness_from_requested_minimum(tmp_path):
     ready = client.get("/v1/training/queue?workload=pr_summary&minimum_examples=1").json()
     assert ready["pending"] == 1
     assert ready["enough_examples"] is True
+
+
+def test_queue_deduplicates_conflicts_and_consumed_examples(tmp_path):
+    client, app, _, _ = make_client(tmp_path)
+    db = app.state.database
+
+    def capture():
+        result = client.post("/v1/chat/completions", json=request_body(capture=True)).json()
+        return f"/v1/traces/{result['italix']['trace_id']}/feedback"
+
+    first, second = capture(), capture()
+    for endpoint in (first, second):
+        assert client.post(endpoint, json={"action": "approve"}).json()["queued"]
+    plan = db.create_training_job("pr_summary", 1)
+    assert plan["example_count"] == 1
+    original = db.job_examples(plan["id"])[0]["approved_response"]
+    correction = {"action": "correct", "corrected_response": "Reviewed new target"}
+    assert not client.post(first, json=correction).json()["queued"]
+    assert client.get("/v1/training/queue").json()["pending"] == 0
+    assert db.job_examples(plan["id"])[0]["approved_response"] == original
+    with pytest.raises(ValueError, match="changed or are unavailable"):
+        db.start_training_job(plan["id"], "first-candidate")
+
+    assert client.post(second, json=correction).json()["queued"]
+    replacement = db.create_training_job("pr_summary", 1)
+    assert replacement["example_count"] == 1
+    db.start_training_job(replacement["id"], "second-candidate")
+    assert client.post(first, json={"action": "reject"}).status_code == 409
+    db.finish_training_job(replacement["id"], candidate_id="second-candidate",
+                           adapter_path="fixture", log_path="fixture", metrics={})
+    assert not client.post(first, json=correction).json()["queued"]
+    assert not client.post(capture(), json=correction).json()["queued"]
+    assert client.get("/v1/training/queue").json()["pending"] == 0
+
+
+def test_http_capture_and_feedback_guard_credentials(tmp_path):
+    credential = "password=synthetic-test-value"
+    client, app, local, _ = make_client(tmp_path)
+    body = request_body(capture=True)
+    body["messages"][0]["content"] = credential
+    response = client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 422
+    assert credential not in response.text and local.calls == 0
+
+    result = client.post("/v1/chat/completions", json=request_body(capture=True)).json()
+    endpoint = f"/v1/traces/{result['italix']['trace_id']}/feedback"
+    response = client.post(endpoint, json={"action": "correct", "corrected_response": credential})
+    assert response.status_code == 422 and credential not in response.text
+    assert client.get("/v1/training/queue").json()["pending"] == 0
+
+    local.text = credential
+    response = client.post("/v1/chat/completions", json=request_body(capture=True))
+    assert response.status_code == 200 and credential not in response.text
+    result = response.json()["italix"]
+    assert result["capture_enabled"] is False
+    trace = app.state.database.trace(result["trace_id"])
+    assert trace["prompt_json"] is None and trace["response_text"] is None
+
+
+def test_active_adapter_reevaluation_preserves_route_or_falls_back_atomically(tmp_path):
+    client, app, _, _ = make_client(tmp_path)
+    db = app.state.database
+    with db.connect() as connection:
+        connection.execute("UPDATE models SET active=0 WHERE id='qwen-base'")
+        connection.execute("UPDATE models SET active=1, status='qualified' WHERE id='adapter-v2'")
+    assert db.apply_model_evaluation("adapter-v2", {"qualified": True})["qualified"]
+    assert db.active_model("pr_summary")["id"] == "adapter-v2"
+    assert not db.apply_model_evaluation("adapter-v2", {"qualified": False})["qualified"]
+    assert db.active_model("pr_summary")["id"] == "qwen-base"
+    assert db.deployment_history("pr_summary")[0]["action"] == "evaluation_fallback"
+    assert client.post("/v1/models/adapter-v2/activate", json={"workload": "pr_summary"}).status_code == 409
 
 
 def test_explicit_training_execution_calls_runner_after_queue_snapshot(tmp_path):
@@ -278,6 +399,31 @@ def test_failed_adapters_cannot_activate_and_base_rollback_is_safe(tmp_path):
     rollback = client.post("/v1/routes/pr_summary/rollback")
     assert rollback.status_code == 200
     assert rollback.json()["id"] == "qwen-base"
+
+
+def test_evaluation_rejects_base_models_and_handles_missing_artifacts(tmp_path):
+    class MissingArtifactsEvaluator:
+        def __init__(self):
+            self.calls = []
+
+        def compare(self, candidate_path, *, split, workload):
+            self.calls.append(candidate_path)
+            raise FileNotFoundError("/private/path/adapters.safetensors")
+
+    evaluator = MissingArtifactsEvaluator()
+    client, app, _, _ = make_client(tmp_path, evaluator=evaluator)
+    payload = {"workload": "pr_summary", "split": "valid"}
+    response = client.post("/v1/models/qwen-base/evaluation", json=payload)
+    assert response.status_code == 409
+    assert not evaluator.calls
+
+    model_before = app.state.database.model("adapter-v2")
+    response = client.post("/v1/models/adapter-v2/evaluation", json=payload)
+    assert response.status_code == 503
+    assert evaluator.calls == [model_before["path"]]
+    assert "/private/path" not in response.text
+    assert app.state.database.model("adapter-v2") == model_before
+    assert app.state.database.active_model("pr_summary")["id"] == "qwen-base"
 
 
 def test_only_server_qualified_adapter_can_activate_then_rollback(tmp_path):
@@ -380,6 +526,10 @@ def test_change_triage_feedback_requires_valid_policy_correction(tmp_path):
         "diff --git a/auth/permissions/admin.py b/auth/permissions/admin.py\n+x=1"
     )
     trace_id = client.post("/v1/chat/completions", json=body).json()["italix"]["trace_id"]
+
+    approval = client.post(f"/v1/traces/{trace_id}/feedback", json={"action": "approve"})
+    assert approval.status_code == 422
+    assert "invalid change_triage approval" in approval.json()["detail"]
 
     invalid = client.post(
         f"/v1/traces/{trace_id}/feedback",

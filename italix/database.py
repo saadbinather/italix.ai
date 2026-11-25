@@ -5,11 +5,18 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+from hashlib import sha256
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterator
 
 from italix.change_triage import validate_triage_output
+from italix.engines import prepare_messages
+from italix.privacy import contains_secret
+
+
+TRAINING_DATA = {"pr_summary": "data/v3", "change_triage": "data/change_triage"}
+TRAINING_WORKLOADS = tuple(TRAINING_DATA)
 
 
 def utc_now() -> str:
@@ -71,6 +78,8 @@ CREATE TABLE IF NOT EXISTS training_jobs (
 CREATE TABLE IF NOT EXISTS training_job_examples (
     job_id INTEGER NOT NULL,
     queue_id INTEGER NOT NULL,
+    messages_json TEXT,
+    approved_response TEXT,
     PRIMARY KEY(job_id, queue_id),
     FOREIGN KEY(job_id) REFERENCES training_jobs(id),
     FOREIGN KEY(queue_id) REFERENCES training_queue(id)
@@ -146,10 +155,15 @@ class Database:
                 "metrics_json": "TEXT",
                 "error": "TEXT",
                 "completed_at": "TEXT",
+                "dataset_checksums_json": "TEXT",
             }
             for name, kind in additions.items():
                 if name not in existing:
                     connection.execute(f"ALTER TABLE training_jobs ADD COLUMN {name} {kind}")
+            snapshot_columns = {row["name"] for row in connection.execute("PRAGMA table_info(training_job_examples)")}
+            for name in ("messages_json", "approved_response"):
+                if name not in snapshot_columns:
+                    connection.execute(f"ALTER TABLE training_job_examples ADD COLUMN {name} TEXT")
             now = utc_now()
             seeds = (
                 ("qwen-base", "pr_summary", "base", "base", None, {}, 1, now),
@@ -252,11 +266,11 @@ class Database:
             ).fetchone()
             queue = connection.execute(
                 """SELECT
-                COALESCE(SUM(status='pending'), 0) AS pending,
                 COALESCE(SUM(status='used'), 0) AS used,
                 COALESCE(SUM(status='excluded'), 0) AS excluded
                 FROM training_queue"""
             ).fetchone()
+            pending_examples = len(self._selectable_examples(connection, None))
             completed_jobs = connection.execute(
                 "SELECT COUNT(*) FROM training_jobs WHERE status='completed'"
             ).fetchone()[0]
@@ -288,6 +302,7 @@ class Database:
             ).fetchone()
         result = dict(trace)
         result.update({f"queue_{key}": value for key, value in dict(queue).items()})
+        result["queue_pending"] = pending_examples
         result["training_jobs_completed"] = completed_jobs
         result["active_models"] = [dict(row) for row in active]
         result["latest_training_job"] = self._decoded_job(latest) if latest else None
@@ -377,6 +392,7 @@ class Database:
         self, model_id: str, workload: str, *, action: str = "activate"
     ) -> dict[str, Any]:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM models WHERE id = ? AND workload = ?", (model_id, workload)
             ).fetchone()
@@ -402,46 +418,78 @@ class Database:
         qualified = bool(result["qualified"])
         status = "qualified" if qualified else "experimental_failed"
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
             if row is None:
                 raise LookupError(model_id)
             if row["kind"] != "adapter":
                 raise PermissionError("only adapter candidates can be evaluated")
             connection.execute(
-                "UPDATE models SET status=?, metrics_json=?, active=0 WHERE id=?",
-                (status, json.dumps(result), model_id),
+                "UPDATE models SET status=?, metrics_json=?, active=? WHERE id=?",
+                (status, json.dumps(result), int(qualified and row["active"]), model_id),
             )
+            if row["active"] and not qualified:
+                workload = row["workload"]
+                fallback = "qwen-base-triage" if workload == "change_triage" else "qwen-base"
+                updated = connection.execute(
+                    "UPDATE models SET active=1 WHERE id=? AND workload=? AND kind='base' AND status='base'",
+                    (fallback, workload),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("cannot restore the workload's base route")
+                connection.execute(
+                    "INSERT INTO deployment_events (workload, model_id, action, created_at) VALUES (?, ?, ?, ?)",
+                    (workload, fallback, "evaluation_fallback", utc_now()),
+                )
         return {"id": model_id, "status": status, "qualified": qualified, "evaluation": result}
 
     def add_feedback(self, trace_id: str, action: str, corrected: str | None) -> dict[str, Any]:
+        if corrected and contains_secret(corrected):
+            raise ValueError("Correction appears to contain a credential or secret.")
         trace = self.trace(trace_id)
         if trace is None:
             raise LookupError(trace_id)
         eligible = bool(trace["capture_enabled"] and trace["prompt_json"] and trace["response_text"])
         if action in {"approve", "correct"} and not eligible:
             raise PermissionError("captured prompt and response are required for training eligibility")
-        if action == "correct" and trace["workload"] == "change_triage":
+        selected = self.model(trace["selected_model"])
+        training_eligible = (
+            eligible and trace["workload"] in TRAINING_WORKLOADS
+            and (not selected or selected["kind"] != "system")
+        )
+        response = corrected if action == "correct" else trace["response_text"]
+        if action in {"approve", "correct"} and training_eligible and (
+            contains_secret(response or "") or
+            any(contains_secret(m["content"]) for m in json.loads(trace["prompt_json"]))
+        ):
+            raise ValueError("Training feedback blocked because the example appears to contain a credential.")
+        validate_triage = action == "correct" or (action == "approve" and training_eligible)
+        if trace["workload"] == "change_triage" and validate_triage:
             source = "\n".join(
                 message.get("content", "") for message in json.loads(trace["prompt_json"])
             )
-            validation = validate_triage_output(corrected or "", source)
+            validation = validate_triage_output(response or "", source)
             if not validation["valid"]:
-                raise ValueError(f"invalid change_triage correction: {validation['reason']}")
+                label = "correction" if action == "correct" else "approval"
+                raise ValueError(f"invalid change_triage {label}: {validation['reason']}")
+            response = json.dumps(validation["classification"], separators=(",", ":"))
         status = {"approve": "approved", "correct": "corrected_approved", "reject": "rejected"}[action]
-        selected = self.model(trace["selected_model"])
-        training_eligible = eligible and (not selected or selected["kind"] != "system")
+        queued = False
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute("SELECT status FROM training_queue WHERE trace_id=?", (trace_id,)).fetchone()
+            if current and current["status"] == "running":
+                raise PermissionError("cannot revise an example while its training job is running")
             connection.execute(
                 "INSERT INTO feedback (trace_id, action, corrected_response, eligible, created_at) VALUES (?, ?, ?, ?, ?)",
-                (trace_id, action, corrected, int(eligible), utc_now()),
+                (trace_id, action, corrected, int(training_eligible), utc_now()),
             )
             connection.execute("UPDATE traces SET feedback_status = ? WHERE id = ?", (status, trace_id))
             if action == "reject":
                 connection.execute(
-                    "UPDATE training_queue SET status = 'excluded' WHERE trace_id = ?", (trace_id,)
+                    "UPDATE training_queue SET status = 'excluded' WHERE trace_id = ? AND status != 'used'", (trace_id,)
                 )
-            elif training_eligible:
-                response = corrected if action == "correct" else trace["response_text"]
+            elif training_eligible and not (current and current["status"] == "used"):
                 connection.execute(
                     """INSERT INTO training_queue
                     (trace_id, workload, messages_json, approved_response, status, created_at)
@@ -450,11 +498,46 @@ class Database:
                     approved_response = excluded.approved_response, status = 'pending', created_at = excluded.created_at""",
                     (trace_id, trace["workload"], trace["prompt_json"], response, utc_now()),
                 )
+                key = self._example_key(trace["workload"], trace["prompt_json"])
+                queued = any(self._example_key(row["workload"], row["messages_json"]) == key
+                             for row in self._selectable_examples(connection, trace["workload"]))
         return {
             "trace_id": trace_id,
             "feedback_status": status,
-            "queued": action != "reject" and training_eligible,
+            "queued": queued,
         }
+
+    @staticmethod
+    def _example_key(workload: str, messages_json: str) -> tuple[str, str]:
+        messages = prepare_messages(workload, json.loads(messages_json))
+        return workload, json.dumps(messages, sort_keys=True)
+
+    def _selectable_examples(self, connection, workload: str | None):
+        clause, params = ("", ()) if workload is None else (" WHERE workload = ?", (workload,))
+        rows = connection.execute("SELECT * FROM training_queue" + clause + " ORDER BY id", params)
+        consumed = connection.execute(
+            """SELECT q.workload, COALESCE(e.messages_json, q.messages_json) AS messages_json
+               FROM training_job_examples e JOIN training_jobs j ON j.id=e.job_id
+               JOIN training_queue q ON q.id=e.queue_id WHERE j.status='completed'"""
+            + (" AND q.workload=?" if workload is not None else ""), params
+        )
+        unavailable = {self._example_key(row["workload"], row["messages_json"]) for row in consumed}
+        conflicts = set()
+        pending = {}
+        for row in rows:
+            if row["workload"] not in TRAINING_WORKLOADS or row["status"] == "excluded":
+                continue
+            key = self._example_key(row["workload"], row["messages_json"])
+            if row["status"] in {"running", "used"}:
+                unavailable.add(key)
+            elif row["status"] == "pending":
+                if key in pending and pending[key]["approved_response"] != row["approved_response"]:
+                    conflicts.add(key)
+                pending.setdefault(key, row)
+        return [row for key, row in pending.items()
+                if key not in unavailable and key not in conflicts
+                and not contains_secret(row["approved_response"])
+                and not any(contains_secret(m["content"]) for m in json.loads(row["messages_json"]))]
 
     def queue_summary(
         self, workload: str | None = None, minimum_examples: int = 10
@@ -465,8 +548,10 @@ class Database:
                 "SELECT status, COUNT(*) AS count FROM training_queue" + clause + " GROUP BY status",
                 params,
             ).fetchall()
+            pending = len(self._selectable_examples(connection, workload))
         counts = {row["status"]: row["count"] for row in rows}
-        pending = counts.get("pending", 0)
+        if "pending" in counts:
+            counts["pending"] = pending
         return {
             "workload": workload,
             "counts": counts,
@@ -478,24 +563,28 @@ class Database:
     def create_training_job(
         self, workload: str, minimum: int, candidate_id: str | None = None
     ) -> dict[str, Any]:
-        count = self.queue_summary(workload, minimum)["pending"]
-        if count < minimum:
-            raise PermissionError(f"need {minimum} pending examples; found {count}")
+        if workload not in TRAINING_WORKLOADS:
+            raise ValueError(f"unsupported training workload: {workload}")
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = self._selectable_examples(connection, workload)
+            count = len(rows)
+            if count < minimum:
+                raise PermissionError(f"need {minimum} pending examples; found {count}")
+            dataset = Path(__file__).resolve().parents[1] / TRAINING_DATA[workload]
+            checksums = {name: sha256((dataset / name).read_bytes()).hexdigest()
+                         for name in ("train.jsonl", "valid.jsonl")}
             cursor = connection.execute(
                 """INSERT INTO training_jobs
-                (workload, example_count, status, created_at, candidate_id)
-                VALUES (?, ?, 'planned', ?, ?)""",
-                (workload, count, utc_now(), candidate_id),
+                (workload, example_count, status, created_at, candidate_id, dataset_checksums_json)
+                VALUES (?, ?, 'planned', ?, ?, ?)""",
+                (workload, count, utc_now(), candidate_id, json.dumps(checksums)),
             )
             job_id = cursor.lastrowid
-            rows = connection.execute(
-                "SELECT id FROM training_queue WHERE workload = ? AND status = 'pending' ORDER BY id",
-                (workload,),
-            ).fetchall()
             connection.executemany(
-                "INSERT INTO training_job_examples (job_id, queue_id) VALUES (?, ?)",
-                [(job_id, row["id"]) for row in rows],
+                """INSERT INTO training_job_examples
+                   (job_id, queue_id, messages_json, approved_response) VALUES (?, ?, ?, ?)""",
+                [(job_id, row["id"], row["messages_json"], row["approved_response"]) for row in rows],
             )
         return {
             "id": job_id,
@@ -513,16 +602,41 @@ class Database:
     def job_examples(self, job_id: int) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT q.* FROM training_queue q
+                """SELECT q.id, q.trace_id, q.workload, q.status, j.messages_json, j.approved_response,
+                          q.messages_json = j.messages_json
+                              AND q.approved_response = j.approved_response AS unchanged
+                   FROM training_queue q
                 JOIN training_job_examples j ON j.queue_id = q.id
                 WHERE j.job_id = ? ORDER BY q.id""",
                 (job_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def start_training_job(self, job_id: int) -> None:
+    def start_training_job(self, job_id: int, candidate_id: str) -> None:
         with self.connect() as connection:
-            connection.execute("UPDATE training_jobs SET status = 'running' WHERE id = ?", (job_id,))
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute("SELECT * FROM training_jobs WHERE id=?", (job_id,)).fetchone()
+            if not job or job["status"] != "planned":
+                raise ValueError("training job must exist and be planned")
+            if connection.execute("SELECT 1 FROM models WHERE id=?", (candidate_id,)).fetchone() or connection.execute(
+                "SELECT 1 FROM training_jobs WHERE candidate_id=? AND status='running'", (candidate_id,)
+            ).fetchone():
+                raise ValueError("candidate ID is already in use")
+            selected = {row["id"] for row in self._selectable_examples(connection, job["workload"])}
+            examples = connection.execute(
+                """SELECT q.id, q.messages_json = j.messages_json AND
+                   q.approved_response = j.approved_response AS unchanged
+                   FROM training_job_examples j JOIN training_queue q ON q.id=j.queue_id
+                   WHERE j.job_id=?""", (job_id,),
+            ).fetchall()
+            if len(examples) != job["example_count"] or any(
+                row["id"] not in selected or not row["unchanged"] for row in examples
+            ):
+                raise ValueError("reviewed examples changed or are unavailable; create a new plan")
+            connection.executemany("UPDATE training_queue SET status='running' WHERE id=?",
+                                   [(row["id"],) for row in examples])
+            connection.execute("UPDATE training_jobs SET status='running', candidate_id=? WHERE id=?",
+                               (candidate_id, job_id))
 
     def finish_training_job(
         self,
@@ -550,15 +664,17 @@ class Database:
             connection.execute(
                 """INSERT INTO models
                 (id, workload, kind, status, path, metrics_json, active, created_at)
-                VALUES (?, ?, 'adapter', 'experimental', ?, ?, 0, ?)
-                ON CONFLICT(id) DO UPDATE SET status='experimental', path=excluded.path,
-                metrics_json=excluded.metrics_json, active=0""",
+                VALUES (?, ?, 'adapter', 'experimental', ?, ?, 0, ?)""",
                 (candidate_id, workload, adapter_path, json.dumps(metrics), utc_now()),
             )
         return self.training_job(job_id)
 
     def fail_training_job(self, job_id: int, error: str) -> None:
         with self.connect() as connection:
+            connection.execute(
+                """UPDATE training_queue SET status='pending' WHERE status='running'
+                   AND id IN (SELECT queue_id FROM training_job_examples WHERE job_id=?)""", (job_id,)
+            )
             connection.execute(
                 "UPDATE training_jobs SET status='failed', error=?, completed_at=? WHERE id=?",
                 (error, utc_now(), job_id),

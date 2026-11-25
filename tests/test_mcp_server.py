@@ -69,6 +69,11 @@ def fake_backend():
             },
         }
 
+    @app.post("/v1/hybrid/change-triage/v2")
+    def hybrid(payload: dict):
+        observed["hybrid"] = payload
+        return {"decision_source": "human_review", "abstention_reason": "unknown_policy_path"}
+
     @app.post("/v1/traces/{trace_id}/feedback")
     def feedback(trace_id: str, payload: dict):
         observed["feedback"] = {"trace_id": trace_id, **payload}
@@ -98,6 +103,7 @@ def fake_backend():
              "candidate_id": "adapter-v3", "created_at": "2026-10-19T00:00:00Z",
              "completed_at": "2026-10-19T01:00:00Z"},
             {"id": 3, "workload": "change_triage", "status": "failed"},
+            {"id": 4, "workload": "change_triage", "status": "running"},
         ]}
 
     @app.get("/v1/models")
@@ -208,8 +214,18 @@ def test_stdio_discovery_and_tools_with_actual_mcp_client(fake_backend):
                 tools = await session.list_tools()
                 assert [tool.name for tool in tools.tools] == [
                     "italix_status", "italix_learning_status", "italix_train_specialist",
-                    "italix_deploy_specialist", "italix_chat", "italix_submit_feedback"
+                    "italix_deploy_specialist", "italix_chat", "italix_hybrid_triage", "italix_submit_feedback"
                 ]
+                hybrid = await session.call_tool(
+                    "italix_hybrid_triage", {"content": "synthetic patch", "explain": True}
+                )
+                assert not hybrid.isError
+                assert hybrid.structuredContent["decision_source"] == "human_review"
+                assert observed["hybrid"] == {"content": "synthetic patch", "explain": True}
+                secret = await session.call_tool(
+                    "italix_hybrid_triage", {"content": "GEMINI_API_KEY=private-value"}
+                )
+                assert secret.isError
                 chat_schema = next(tool for tool in tools.tools if tool.name == "italix_chat")
                 assert chat_schema.inputSchema["properties"]["task"]["maxLength"] == 20_000
                 assert chat_schema.inputSchema["properties"]["capture"]["default"] is False
@@ -222,7 +238,9 @@ def test_stdio_discovery_and_tools_with_actual_mcp_client(fake_backend):
                 assert learning.isError is False
                 assert learning.structuredContent["workloads"]["pr_summary"]["enough_examples"] is True
                 assert learning.structuredContent["workloads"]["change_triage"]["enough_examples"] is False
-                assert [job["status"] for job in learning.structuredContent["training_jobs"]] == ["planned", "completed"]
+                assert [job["status"] for job in learning.structuredContent["training_jobs"]] == [
+                    "planned", "completed", "failed", "running",
+                ]
                 assert learning.structuredContent["adapters"][0]["qualified"] is False
                 assert len(learning.structuredContent["active_models"]) == 2
                 assert learning.structuredContent["latest_evaluation"]["qualified"] is False
