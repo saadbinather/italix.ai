@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from time import perf_counter
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Response
 
 from italix.auth import BearerAuthorizer
-from italix.database import Database
+from italix.database import TRAINING_WORKLOADS, Database
 from italix.engines import (
     DeterministicPRSummaryEngine,
     GeminiEngine,
@@ -18,7 +19,9 @@ from italix.engines import (
     LocalMLXEngine,
 )
 from italix.evaluation import ServerEvaluator
+from italix.hybrid_triage import hybrid_triage
 from italix.memory import MemoryService
+from italix.privacy import redact
 from italix.change_triage import PRODUCTION_PROMPT, deterministic_triage
 from italix.schemas import (
     ActivationRequest,
@@ -29,6 +32,7 @@ from italix.schemas import (
     DiscussionMemoryImportRequest,
     MemoryQueryRequest,
     HybridTriageRequest,
+    HybridTriageV2Request,
     ModelEvaluationRequest,
     TrainingJobRequest,
 )
@@ -58,6 +62,8 @@ def create_app(
         groq=groq_engine or GroqEngine(),
         deterministic_pr=deterministic_pr_engine or DeterministicPRSummaryEngine(),
     )
+    hybrid_model_id = os.getenv("ITALIX_HYBRID_MODEL")
+    hybrid_engine = LocalMLXEngine(model_id=hybrid_model_id) if hybrid_model_id else service.local
     runner = training_runner or TrainingJobRunner(database)
     evaluator = evaluation_runner or ServerEvaluator()
     memory = MemoryService(database, service.local)
@@ -85,10 +91,12 @@ def create_app(
             body, trace_id = service.complete(request)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=redact(str(exc))) from exc
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail=redact(str(exc))) from exc
         except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail=redact(str(exc))) from exc
         response.headers["x-italix-trace-id"] = trace_id
         return body
 
@@ -140,6 +148,8 @@ def create_app(
         dependencies=[Depends(authorizer.require_operator)],
     )
     def plan_training(request: TrainingJobRequest):
+        if request.workload not in TRAINING_WORKLOADS:
+            raise HTTPException(status_code=422, detail="unsupported training workload")
         try:
             planned = database.create_training_job(
                 request.workload, request.minimum_examples, request.candidate_id
@@ -185,17 +195,22 @@ def create_app(
         dependencies=[Depends(authorizer.require_operator)],
     )
     def record_evaluation(model_id: str, request: ModelEvaluationRequest):
-        models = {model["id"]: model for model in database.list_models()}
-        if model_id not in models:
+        model = database.model(model_id)
+        if model is None:
             raise HTTPException(status_code=404, detail="model not found")
-        model = models[model_id]
         if model["workload"] != request.workload:
             raise HTTPException(status_code=409, detail="workload does not match model")
+        if model["kind"] != "adapter":
+            raise HTTPException(status_code=409, detail="only adapter candidates can be evaluated")
+        if not model["path"]:
+            raise HTTPException(status_code=503, detail="adapter artifacts are unavailable")
         try:
             result = evaluator.compare(model["path"], split=request.split, workload=model["workload"])
-            return database.apply_model_evaluation(model_id, result)
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="adapter evaluation could not run locally") from exc
+        return database.apply_model_evaluation(model_id, result)
 
     @app.post(
         "/v1/routes/{workload}/rollback",
@@ -295,6 +310,15 @@ def create_app(
                 "adapter_used": False, "cloud_used": True, "result": generation.text,
                 "model": generation.model, "prompt_tokens": generation.prompt_tokens,
                 "completion_tokens": generation.completion_tokens}
+
+    @app.post(
+        "/v1/hybrid/change-triage/v2",
+        dependencies=[Depends(authorizer.require_operator)],
+    )
+    def hybrid_change_triage_v2(request: HybridTriageV2Request):
+        started = perf_counter()
+        result = hybrid_triage(request.content, explain=request.explain, engine=hybrid_engine)
+        return {**result, "latency_ms": round((perf_counter() - started) * 1000, 2)}
 
     return app
 

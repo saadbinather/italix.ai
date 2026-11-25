@@ -39,6 +39,10 @@ training-queue*
 data/**/holdout.jsonl
 data/holdout.jsonl
 data/test.jsonl
+data/**/final-test*.jsonl
+data/**/reserved-test*.jsonl
+data/phase6/unseen.jsonl
+data/phase6/audit.json
 data/**/private/
 data/**/sealed/
 

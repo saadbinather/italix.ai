@@ -25,7 +25,8 @@ const origin = `http://${host}:${frontendPort}`;
 const unlockSecret = randomBytes(32).toString("base64url");
 const sessionSecret = randomBytes(32).toString("base64url");
 
-const health = await fetch("http://127.0.0.1:8000/health");
+const apiUrl = process.env.ITALIX_API_URL ?? "http://127.0.0.1:8000";
+const health = await fetch(`${apiUrl}/health`);
 assert.equal(health.ok, true, "FastAPI must be running for live browser verification");
 
 const next = spawn(
@@ -36,7 +37,7 @@ const next = spawn(
     env: {
       ...process.env,
       NODE_ENV: "production",
-      ITALIX_API_URL: "http://127.0.0.1:8000",
+      ITALIX_API_URL: apiUrl,
       ITALIX_OPERATOR_TOKEN: operatorToken,
       ITALIX_OPERATOR_UNLOCK_SECRET: unlockSecret,
       ITALIX_SESSION_SECRET: sessionSecret,
@@ -94,10 +95,11 @@ try {
   assert.ok(evidence.trace_id.length > 10);
   assert.match(evidence.response, /REQUEST_TIMEOUT_SECONDS/);
 
-  await mkdir(join(process.cwd(), "artifacts", "screenshots"), { recursive: true });
-  await page.screenshot({ path: join(process.cwd(), "artifacts", "screenshots", "gateway-desktop.png"), fullPage: true });
+  const screenshotDirectory = process.env.ITALIX_GATEWAY_SCREENSHOTS ?? join(process.cwd(), "artifacts", "screenshots");
+  await mkdir(screenshotDirectory, { recursive: true });
+  await page.screenshot({ path: join(screenshotDirectory, "gateway-desktop.png"), fullPage: true });
   await page.setViewportSize({ width: 500, height: 1000 });
-  await page.screenshot({ path: join(process.cwd(), "artifacts", "screenshots", "gateway-mobile.png"), fullPage: true });
+  await page.screenshot({ path: join(screenshotDirectory, "gateway-mobile.png"), fullPage: true });
 
   await page.getByLabel("Prompt or Git diff").fill(
     "diff --git a/logo.png b/logo.png\nnew file mode 100644\nBinary files /dev/null and b/logo.png differ",
@@ -105,6 +107,22 @@ try {
   await page.getByRole("button", { name: /^Generate/ }).click();
   await page.getByText("Abstained", { exact: true }).waitFor({ timeout: 30_000 });
   const abstentionOutput = (await page.getByTestId("response-output").innerText()).trim();
+
+  await page.getByLabel("Workload").selectOption("hybrid_triage");
+  await page.getByRole("button", { name: /^Generate/ }).click();
+  const hybrid = page.getByTestId("hybrid-result");
+  await hybrid.getByText(/Human review required/).waitFor();
+  const patchPath = "api/rate_limit/rules.py";
+  await page.getByLabel("Prompt or Git diff").fill(
+    `diff --git a/${patchPath} b/${patchPath}\n--- a/${patchPath}\n+++ b/${patchPath}\n@@ -1 +1 @@\n-LIMIT = 10\n+LIMIT = 5`,
+  );
+  await page.getByLabel("Select evidence with the local model").check();
+  await page.getByRole("button", { name: /^Generate/ }).click();
+  await hybrid.getByText(/deterministic_policy.*policy_validated/).waitFor({ timeout: 30_000 });
+  assert.match(await hybrid.innerText(), /"risk": "medium"/);
+  assert.match(await hybrid.innerText(), /Local model invocation attempted · Yes/);
+  assert.match(await hybrid.innerText(), /Prompt tokens · \d+ · Output tokens · \d+/);
+  assert.match(await hybrid.innerText(), /Code excerpts/);
 
   await page.getByRole("button", { name: "Lock session" }).click();
   await page.getByRole("button", { name: "Unlock playground" }).waitFor();

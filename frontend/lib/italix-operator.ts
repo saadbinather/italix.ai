@@ -111,15 +111,18 @@ function evaluationAggregate(metrics: Record<string, unknown>, candidateId: stri
   if (directPassed !== null || directTotal !== null) return { passed: directPassed, total: directTotal };
   const candidates = Array.isArray(evaluation.candidates) ? evaluation.candidates : [];
   const normalized = candidateId?.replaceAll("-", "_");
-  const selected = candidates.map(record).find((candidate) => candidate.name === normalized || candidate.name === candidateId);
+  const selected = candidates.map(record).find((candidate) =>
+    candidate.name === "candidate" || candidate.name === normalized || candidate.name === candidateId);
   return { passed: nullableNumber(selected?.passed), total: nullableNumber(selected?.total) };
 }
 
-function sanitizeJob(value: unknown): LearningJob {
+function sanitizeJob(value: unknown, models: ReadonlyMap<string, LearningModel>): LearningJob {
   const job = record(value);
   const metrics = record(job.metrics);
   const candidateId = nullableText(job.candidate_id);
   const aggregate = evaluationAggregate(metrics, candidateId);
+  const model = candidateId === null ? undefined : models.get(candidateId);
+  const evaluation = model?.kind === "adapter" && model.workload === job.workload ? model : undefined;
   const safeMetrics: LearningJobMetrics = {
     duration_seconds: nullableNumber(metrics.duration_seconds),
     optimizer_steps: nullableNumber(metrics.optimizer_steps),
@@ -128,9 +131,9 @@ function sanitizeJob(value: unknown): LearningJob {
     peak_mlx_memory_gb: nullableNumber(metrics.peak_mlx_memory_gb),
     final_training_loss: finalLoss(metrics.training_losses),
     final_validation_loss: finalLoss(metrics.validation_losses),
-    evaluation_passed: aggregate.passed,
-    evaluation_total: aggregate.total,
-    qualification_reason: nullableText(record(metrics.evaluation).qualification_reason),
+    evaluation_passed: evaluation?.evaluation_passed ?? aggregate.passed,
+    evaluation_total: evaluation?.evaluation_total ?? aggregate.total,
+    qualification_reason: evaluation?.qualification_reason ?? nullableText(record(metrics.evaluation).qualification_reason),
   };
   return {
     id: numeric(job.id),
@@ -151,7 +154,7 @@ function modelAggregate(metrics: Record<string, unknown>, id: string) {
   const normalized = id.replaceAll("-", "_");
   const candidate = (Array.isArray(metrics.candidates) ? metrics.candidates : [])
     .map(record)
-    .find((item) => item.name === id || item.name === normalized);
+    .find((item) => item.name === "candidate" || item.name === id || item.name === normalized);
   return { passed: nullableNumber(candidate?.passed), total: nullableNumber(candidate?.total) };
 }
 
@@ -189,10 +192,12 @@ export async function getLearningStudioData(): Promise<LearningStudioData> {
   ]);
   const queues = queueValues.map((value, index) => sanitizeQueue(value, workloads[index]));
   const configurations = configValues.map((value, index) => sanitizeConfig(value, workloads[index]));
-  const jobs = (Array.isArray(record(jobsValue).data) ? record(jobsValue).data as unknown[] : []).map(sanitizeJob);
   const models = (Array.isArray(record(modelsValue).data) ? record(modelsValue).data as unknown[] : [])
     .map(sanitizeModel)
     .filter((model): model is LearningModel => model !== null);
+  const modelsById = new Map(models.map((model) => [model.id, model]));
+  const jobs = (Array.isArray(record(jobsValue).data) ? record(jobsValue).data as unknown[] : [])
+    .map((job) => sanitizeJob(job, modelsById));
   const adapters = models.filter((model) => model.kind === "adapter");
   return {
     queues,
@@ -214,11 +219,19 @@ export async function getLearningStudioData(): Promise<LearningStudioData> {
 export async function createOperatorChatCompletion(
   request: OperatorChatRequest,
 ): Promise<OperatorBackendResponse> {
+  return operatorPost("/v1/chat/completions", request);
+}
+
+export async function createOperatorHybridTriage(request: { content: string; explain: boolean }) {
+  return operatorPost("/v1/hybrid/change-triage/v2", request);
+}
+
+async function operatorPost(path: string, request: unknown): Promise<OperatorBackendResponse> {
   const token = process.env.ITALIX_OPERATOR_TOKEN;
   if (!token) throw new Error("ITALIX operator credentials are not configured.");
 
   const started = performance.now();
-  const response = await fetch(`${backendUrl()}/v1/chat/completions`, {
+  const response = await fetch(`${backendUrl()}${path}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,

@@ -3,11 +3,38 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from italix.evaluation import score_response
+from italix import evaluation
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ROWS = [json.loads(line) for line in (ROOT / "data/v3/valid.jsonl").read_text().splitlines()]
+
+
+@pytest.mark.parametrize("candidate_passes, qualified", [(6, True), (5, False)])
+def test_pr_qualification_is_independent_of_historical_adapter(tmp_path, monkeypatch, candidate_passes, qualified):
+    validation = tmp_path / "data/v3/valid.jsonl"
+    validation.parent.mkdir(parents=True)
+    validation.write_bytes((ROOT / "data/v3/valid.jsonl").read_bytes())
+    monkeypatch.setattr(evaluation, "cached_qwen_path", lambda: tmp_path / "pinned-revision")
+    evaluator = evaluation.ServerEvaluator(tmp_path)
+    scores = {"base_raw": 2, "base_scaffold": 5, "candidate": candidate_passes, "adapter_v2": 6}
+    monkeypatch.setattr(evaluator, "_candidate", lambda name, *args, **kwargs: {
+        "name": name, "passed": scores[name], "total": len(ROWS)
+    })
+    without = evaluator.compare("candidate")
+    historical = tmp_path / "artifacts/adapters/v2"
+    historical.mkdir(parents=True)
+    for name in ("adapter_config.json", "adapters.safetensors"):
+        (historical / name).touch()
+    with_history = evaluator.compare("candidate")
+    assert without["qualified"] is with_history["qualified"] is qualified
+    assert without["qualification_reason"] == with_history["qualification_reason"]
+    assert without["dataset_sha256"] == with_history["dataset_sha256"]
+    assert without["historical_adapter_v2"] == "unavailable"
+    assert with_history["historical_adapter_v2"] == "evaluated"
 
 CASE_2_ACTUAL = """## Summary
 - Update the `redact` function to remove sensitive fields from the data object.

@@ -49,7 +49,23 @@ const backend = createServer((request, response) => {
     }
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ data: [{ id: "adapter-test", workload: "pr_summary", kind: "adapter", status: "experimental_failed", active: 0, created_at: "2026-01-01T00:00:00Z", path: "/private/path", metrics_json: JSON.stringify({ qualification_reason: "did not pass gates", response: "SENSITIVE_RAW_EXAMPLE" }) }] }));
+      response.end(JSON.stringify({ data: [{
+        id: "adapter-test", workload: "pr_summary", kind: "adapter", status: "experimental_failed",
+        active: 0, created_at: "2026-01-01T00:00:00Z", path: "/private/path",
+        metrics_json: JSON.stringify({
+          qualification_reason: "did not pass gates",
+          candidates: [
+            { name: "base_scaffold", passed: 6, total: 12 },
+            { name: "candidate", passed: 5, total: 12, examples: ["SENSITIVE_RAW_EXAMPLE"] },
+          ],
+        }),
+      }] }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/hybrid/change-triage/v2") {
+      backendRequests.push({ authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks)) });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ decision_source: "human_review", policy_evidence: [], latency_ms: 1 }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -184,6 +200,13 @@ try {
   const learningText = await learning.text();
   assert.equal(learningText.includes("SENSITIVE_RAW_EXAMPLE"), false);
   assert.equal(learningText.includes("/private/path"), false);
+  const learningData = JSON.parse(learningText);
+  assert.equal(learningData.models[0].evaluation_passed, 5);
+  assert.equal(learningData.models[0].evaluation_total, 12);
+  assert.equal(learningData.models[0].qualified, false);
+  assert.equal(learningData.jobs[0].metrics.evaluation_passed, 5);
+  assert.equal(learningData.jobs[0].metrics.evaluation_total, 12);
+  assert.equal(learningData.jobs[0].metrics.final_training_loss, 1);
 
   const invalidParameters = await fetch(chatUrl, {
     method: "POST",
@@ -217,6 +240,22 @@ try {
   });
   assert.equal(expired.status, 401);
 
+  const hybridUrl = `${origin}/api/operator/hybrid/change-triage`;
+  const hybridBody = { content: "Synthetic patch", explain: false };
+  function postHybrid(body, headers) {
+    return fetch(hybridUrl, { method: "POST", headers: jsonHeaders(headers), body: JSON.stringify(body) });
+  }
+  const beforeHybrid = backendRequests.length;
+  assert.equal((await postHybrid(hybridBody)).status, 401);
+  assert.equal((await postHybrid(hybridBody, { Cookie: cookie, Origin: "http://malicious.invalid" })).status, 403);
+  assert.equal((await postHybrid({ ...hybridBody, capture: true }, { Cookie: cookie })).status, 400);
+  assert.equal(backendRequests.length, beforeHybrid);
+  const hybrid = await postHybrid(hybridBody, { Cookie: cookie });
+  assert.equal(hybrid.status, 200);
+  assert.equal(hybrid.headers.get("Cache-Control"), "no-store");
+  assert.equal((await hybrid.json()).decision_source, "human_review");
+  assert.deepEqual(backendRequests.at(-1), { authorization: `Bearer ${operatorToken}`, body: hybridBody });
+
   const logout = await fetch(sessionUrl, { method: "DELETE", headers: { Origin: origin, Cookie: cookie } });
   assert.equal(logout.status, 200);
   assert.match(logout.headers.get("set-cookie") ?? "", /Max-Age=0/i);
@@ -232,7 +271,7 @@ try {
   }
   await scanDirectory(join(process.cwd(), ".next", "static"), [operatorToken, viewerToken, unlockSecret, sessionSecret]);
 
-  console.log("operator security tests: 17 passed");
+  console.log("operator security tests: 21 passed");
 } finally {
   next.kill("SIGTERM");
   await new Promise((resolve) => backend.close(resolve));
